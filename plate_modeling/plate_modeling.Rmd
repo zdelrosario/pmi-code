@@ -1,0 +1,376 @@
+---
+title: "Laminate Plate Modeling"
+author: "Zach del Rosario"
+date: 2020-07-13
+output:
+  pdf_document
+---
+
+**Objective**: If feasible, fit a monomial-standard model of the angle ply
+problem.
+
+**Strategy**: Log-transforming the data will turn products into linear
+combinations. If we can successfully log-transform all the inputs, we can
+simply perform linear regression to fit the exponents.
+
+Technically there are two decision variables in this problem: the individual
+thicknesses of the two-layer composite. We'll fit on these two factors
+individually, but fix a single thickness in the final model definition.
+
+# Setup
+<!-- -------------------------------------------------- -->
+
+```{r setup}
+library(tidyverse)
+
+file_sim <- "../data/plate_sim.csv"
+file_weights <-  "../data/plate_weights.csv"
+file_param <-  "../data/plate_parameters.csv"
+```
+
+Note that the plane laminate implements its "g" as $g = 1 - \sigma_a /
+\sigma_c$. Let's upfront back-calculate the applied stress.
+
+```{r load}
+df_sim <-
+  read_csv(file_sim) %>%
+  mutate(
+    app_22_t_0 = sigma_22_t_0 * (1 - g_22_tension_0),
+    app_22_t_1 = sigma_22_t_1 * (1 - g_22_tension_1)
+  )
+```
+
+I only plan to use the tensile limit states, so I leave the other applied
+stresses uncalculated.
+
+# EDA
+<!-- -------------------------------------------------- -->
+
+## Zero-crossings
+<!-- ------------------------- -->
+
+Are there any variables that cross zero?
+
+```{r zero-crossing}
+df_sim %>%
+  summarize(across(everything(), ~ any(. < 0) & any(0 < .))) %>%
+  pivot_longer(
+    names_to = "factor",
+    values_to = "crossing",
+    cols = everything()
+  ) %>%
+  filter(crossing)
+```
+
+**Observations**:
+
+- The fiber-orthogonal failure mode is active, as accounted by the limit state crossings. We will deal with these zero-crossing by filtering out negative values.
+- The RV model to allows negative poisson values. That's not technically wrong (according to thermodynamic admissibility), but still strange.
+- Some applied stresses along the 22 direction are negative (compressive). These are highly non-critical, but strange.
+
+How many poisson values go negative?
+
+```{r negative-poisson}
+df_sim %>%
+  select(nu12_0, nu12_1) %>%
+  pivot_longer(
+    names_to = "factor",
+    values_to = "value",
+    cols = everything()
+  ) %>%
+
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_grid(~factor)
+```
+
+There's a very small tail crossing zero. Let's truncate this.
+
+Let's inspect the negative-stress cases. What can explain those?
+
+```{r negative-applied-stress}
+df_sim %>%
+  ggplot(aes(theta_0, theta_1)) +
+  geom_point() +
+  geom_point(
+    data = . %>%
+      filter(app_22_t_0 < 0),
+    color = "red"
+  )
+```
+
+Interesting; at strong off-nominal ply angles the cross-fiber stress can become compressive. This makes geometric sense.
+
+There's not much danger in simply truncating these cases; this instances are far from the failure state.
+
+## Negative factors
+<!-- ------------------------- -->
+
+Are there any factors that are negative?
+
+```{r negative-factors}
+df_sim %>%
+  summarize(across(everything(), ~ all(. < 0))) %>%
+  pivot_longer(
+    names_to = "factor",
+    values_to = "crossing",
+    cols = everything()
+  ) %>%
+  filter(crossing)
+```
+
+The only negative factor is `theta_0`. We can re-code this variable as positive.
+
+## Data processing
+<!-- ------------------------- -->
+
+Let's implement the choices above:
+
+- Filter the negative poisson values
+- Re-code `theta_0` as negative
+- Log-transform the factors and response
+- Compute the applied stress $\sigma_a = \sigma_c - g$
+
+```{r process}
+var_factors <-
+  df_sim %>%
+  select(-contains("g_")) %>%
+  select(
+    -contains("sigma_11"),
+    -contains("sigma_12"),
+    -contains("22_c"),
+    -contains("app")
+  ) %>%
+  names()
+
+df_wk <-
+  df_sim %>%
+  filter(
+    nu12_0 > 0,
+    nu12_1 > 0,
+    app_22_t_0 > 0,
+    app_22_t_1 > 0
+  ) %>%
+  mutate(theta_0 = -theta_0) %>%
+  select(-contains("g_")) %>%
+  mutate(across(everything(), log))
+```
+
+# Modeling
+<!-- -------------------------------------------------- -->
+
+## Function Model
+<!-- ------------------------- -->
+
+Successful operation corresponds to
+
+$$\sigma_a / \sigma_c < 1$$.
+
+Model the applied stress $\sigma_a$; we already know the exponent for
+$\sigma_c$ (negative one).
+
+Let's fit two models: One for each of the two cross-ply failure modes. Filter
+out the irrelevant strength values. Otherwise fit on all factors to account for
+cross-ply stress interactions.
+
+```{r fit-applied_22_0}
+df_tmp0 <-
+  df_wk %>%
+  select(all_of(var_factors), app_22_t_0) %>%
+  select(-contains("sigma"))
+
+fit_22_0 <-
+  df_tmp0 %>%
+  lm(
+    formula = app_22_t_0 ~ .,
+    data = .
+  )
+
+summary(fit_22_0)
+```
+
+The fit for `app_22_t_0` is decent.
+
+```{r fit-applied_22_1}
+df_tmp1 <-
+  df_wk %>%
+  select(all_of(var_factors), app_22_t_1) %>%
+  select(-contains("sigma"))
+
+fit_22_1 <-
+  df_tmp1 %>%
+  lm(
+    formula = app_22_t_1 ~ .,
+    data = .
+  )
+
+summary(fit_22_1)
+```
+
+The fit for `app_22_t_1` is decent.
+
+Compare the two model coefficients; are they symmetric?
+
+```{r fit-compare}
+df_weights <-
+  bind_rows(
+    fit_22_0 %>%
+    broom::tidy() %>%
+    mutate(model = 0),
+    fit_22_1 %>%
+    broom::tidy() %>%
+    mutate(model = 1)
+  ) %>%
+  select(term, estimate, model) %>%
+  pivot_wider(
+    names_from = model,
+    names_prefix = "estimate_",
+    values_from = estimate,
+    values_fill = 0
+  ) %>%
+  arrange(term)
+
+df_weights
+```
+
+**Observations**:
+
+- The weights are roughly symmetric across the plies. We would be justified in using either of the two models.
+
+## Monomial-standard form
+<!-- ------------------------- -->
+
+```{r make-weights}
+## Reliability constraint
+w <-
+  bind_rows(
+    df_weights %>%
+    select(term, weight = estimate_0) %>%
+      filter(
+        term != "(Intercept)",
+        !str_detect(term, "t_"),
+        !str_detect(term, "theta_"),
+        term != "Nx"
+      ),
+    tribble(
+      ~term, ~weight,
+      "sigma_c", -1,
+      "rho", 0
+    )
+  ) %>%
+  pivot_wider(
+    names_from = term,
+    values_from = weight
+  ) %>%
+  unlist(.)
+
+q <-
+  df_weights %>%
+  filter(str_detect(term, "t_")) %>%
+  summarize(t = sum(estimate_0)) %>%
+  pull(t) %>%
+  .[[1]]
+
+## Objective
+v <-
+  tibble(term = names(w)) %>%
+  mutate(weight = if_else(term == "rho", 1, 0)) %>%
+  pivot_wider(
+    names_from = term,
+    values_from = weight
+  ) %>%
+  unlist(.)
+
+p <- 1
+```
+
+Show the weights
+
+```{r show-weights}
+## Objective
+p
+v
+
+## Reliability constraint
+q
+w
+```
+
+Save the weights to a file
+
+```{r save-weights}
+df_all_weights <-
+  bind_rows(
+    tibble(
+      value = v,
+      factor = names(v)
+    ) %>%
+    mutate(factor = str_c("v-", factor)),
+    tibble(
+      value = w,
+      factor = names(w)
+    ) %>%
+    mutate(factor = str_c("w-", factor))
+  ) %>%
+  bind_rows(
+    tibble(value = p, factor = "p")
+  ) %>%
+  bind_rows(
+    tibble(value = q, factor = "q")
+  )
+
+write_csv(df_all_weights, file_weights)
+
+df_all_weights %>%
+  knitr::kable()
+```
+
+## Density Model
+<!-- ------------------------- -->
+
+A joint density is already defined in the plate model; use the simulations to
+fit parameter values for a lognormal distribution. Use the working
+log-transformed data.
+
+```{r set-parameters}
+df_parameters <-
+  ## Collapse the per-ply data
+  df_wk %>%
+  select(all_of(var_factors)) %>%
+  pivot_longer(
+    names_to = "factor",
+    values_to = "value",
+    cols = matches("sigma")
+  ) %>%
+  mutate(
+    factor = str_remove(factor, "_\\d$"),
+    factor = str_replace(
+      factor,
+      "sigma_22_t",
+      "sigma_c"
+    )
+  ) %>%
+  pivot_wider(
+    names_from = factor,
+    values_from = value
+  ) %>%
+  unnest(-Nx) %>%
+  ## Estimate parameters
+  summarize(across(
+    everything(),
+    c("mu" = mean, "sigma" = ~ sd(.))
+  )) %>%
+  pivot_longer(
+    names_to = c("factor", ".value"),
+    names_pattern = "(.*)_(mu|sigma)",
+    cols = everything()
+  ) %>%
+  arrange(factor) %>%
+  bind_rows(tibble(factor = "rho", mu = log(0.05), sigma = 0.01))
+
+write_csv(df_parameters, file_param)
+
+df_parameters
+```
+
+We will use these as ground-truth parameters for the subsequent PMI study.

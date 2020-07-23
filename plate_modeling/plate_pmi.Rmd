@@ -1,0 +1,426 @@
+---
+title: "Composite Plate PMI"
+author: "Zachary del Rosario"
+date: 2020-07-14
+output:
+  github_document
+---
+
+This document executes various PMI scenario studies of the angle ply composite
+plate. This code was used to generate Figure 4 in the manuscript.
+
+# Setup
+<!-- -------------------------------------------------- -->
+
+Setup helper functions to study scenarios below.
+
+```{r setup}
+library(tidyverse)
+library(rzdr)
+
+file_weights <-  "../data/plate_weights.csv"
+file_param <-  "../data/plate_parameters.csv"
+
+repair_tex <- function(string) {
+  string %>%
+  str_replace_all("DOLLAR", "$") %>%
+  str_replace_all("POW", "^") %>%
+  str_replace_all("\\\\_", "_") %>%
+  str_replace_all("\\\\\\{", "\\{") %>%
+  str_replace_all("\\\\\\}", "\\}") %>%
+  str_replace_all("rho", "\\\\rho") %>%
+  str_replace_all("sigma", "\\\\sigma") %>%
+  str_replace_all("nu", "\\\\nu") %>%
+  str_replace_all("theta", "\\\\theta")
+}
+```
+
+```{r load}
+df_weights <- read_csv(file_weights)
+df_param <- read_csv(file_param)
+```
+
+## Document
+<!-- ------------------------- -->
+
+Write the parameter table for inclusion in writeup:
+
+```{r write-table-param}
+df_units <-
+  tribble(
+       ~factor,   ~units, ~tex,
+        "E1_0",     "Pa", "E_{1,0}",
+        "E1_1",     "Pa", "E_{1,1}",
+        "E2_0",     "Pa", "E_{2,0}",
+        "E2_1",     "Pa", "E_{2,1}",
+       "G12_0",     "Pa", "G_{12,0}",
+       "G12_1",     "Pa", "G_{12,1}",
+      "nu12_0",      "-", "nu_{12,0}",
+      "nu12_1",      "-", "nu_{12,1}",
+          "Nx",      "N", "N_x",
+     "sigma_c",     "Pa", "sigma_c",
+         "t_0",      "m", "t_0",
+         "t_1",      "m", "t_1",
+     "theta_0",      "-", "theta_0",
+     "theta_1",      "-", "theta_1",
+         "rho", "kg/mPOW3", "rho",
+  )
+
+df_param %>%
+  left_join(
+    df_units,
+    by = "factor"
+  ) %>%
+  mutate(
+    mean = exp(mu),
+    factor = str_c("DOLLAR", tex, " (", units, ")DOLLAR")
+  ) %>%
+  select(
+    `Property (Units)` = factor,
+    Mean = mean,
+    COV = sigma
+  ) %>%
+  knitr::kable(digits = 3, format = "latex") %>%
+  repair_tex() %>%
+  cat(., file = "../tables/tab-laminate-param.tex")
+```
+
+Write the weights table for inclusion in writeup:
+
+```{r write-table-weights}
+df_units <-
+  tribble(
+       ~factor,   ~units, ~tex,
+        "E1_0",     "Pa", "E_{1,0}",
+        "E1_1",     "Pa", "E_{1,1}",
+        "E2_0",     "Pa", "E_{2,0}",
+        "E2_1",     "Pa", "E_{2,1}",
+       "G12_0",     "Pa", "G_{12,0}",
+       "G12_1",     "Pa", "G_{12,1}",
+      "nu12_0",      "-", "nu_{12,0}",
+      "nu12_1",      "-", "nu_{12,1}",
+          "Nx",      "N", "N_x",
+     "sigma_c",     "Pa", "sigma_c",
+         "t_0",      "m", "t_0",
+         "t_1",      "m", "t_1",
+     "theta_0",      "-", "theta_0",
+     "theta_1",      "-", "theta_1",
+         "rho", "kg/mPOW3", "rho",
+           "p",      "-",  "p",
+           "q",      "-",  "q"
+  )
+
+df_weights %>%
+  mutate(
+    vector = str_match(factor, "^[vw]"),
+    factor = str_remove_all(factor, "^[vw]-")
+  ) %>%
+  left_join(
+    df_units,
+    by = "factor"
+  ) %>%
+  mutate(factor = str_c("DOLLAR", tex, "DOLLAR")) %>%
+  select(
+    Variable = factor,
+    Vector   = vector,
+    Exponent = value
+  ) %>%
+  knitr::kable(digits = 3, format = "latex") %>%
+  repair_tex() %>%
+  cat(., file = "../tables/tab-laminate-weights.tex")
+```
+
+## Helper functions
+<!-- ------------------------- -->
+
+Unpack the composite plate (angle ply) model weights.
+
+```{r arrange-weights}
+## Unpack vectors
+v <-
+  df_weights %>%
+  filter(str_detect(factor, "^v")) %>%
+  mutate(factor = str_remove(factor, "v-")) %>%
+  pivot_wider(
+    names_from = factor,
+    values_from = value
+  ) %>%
+  unlist(.)
+
+w <-
+  df_weights %>%
+  filter(str_detect(factor, "^w")) %>%
+  mutate(factor = str_remove(factor, "w-")) %>%
+  pivot_wider(
+    names_from = factor,
+    values_from = value
+  ) %>%
+  unlist(.)
+
+## Unpack scalars
+p <-
+  df_weights %>%
+  filter(factor == "p") %>%
+  pull(value) %>%
+  .[[1]]
+
+q <-
+  df_weights %>%
+  filter(factor == "q") %>%
+  pull(value) %>%
+  .[[1]]
+
+## Print values
+v
+w
+p
+q
+```
+
+The following computes the model (combined) parameters under a specified
+distribution parameter scenario `df`.
+
+```{r calc-parameters}
+comp_param <- function(df) {
+  ## Extract the parameters
+  vec_mu <-
+    df %>%
+    select(factor, mu) %>%
+    pivot_wider(
+      names_from = factor,
+      values_from = mu
+    ) %>%
+    select(all_of(names(w))) %>%
+    unlist()
+
+  vec_sigma <-
+    df %>%
+    select(factor, sigma) %>%
+    pivot_wider(
+      names_from = factor,
+      values_from = sigma
+    ) %>%
+    select(all_of(names(w))) %>%
+    unlist()
+
+  ## Compute combined parameters
+  mu_v <- v %*% vec_mu
+  mu_w <- w %*% vec_mu
+
+  sig_v <- sqrt(v^2 %*% vec_sigma^2)
+  sig_w <- sqrt(w^2 %*% vec_sigma^2)
+
+  ## Return packaged values
+  tibble(mu_v = mu_v, mu_w = mu_w, sig_v = sig_v, sig_w = sig_w)
+}
+
+## Test function
+comp_param(df_param)
+```
+
+The following compute the PMI factors under a specified parameter scenario
+`df`, desired reliability `beta_t`, and sampling count `n`.
+
+```{r calc-factors}
+comp_mmi <- function(df = df_param) {
+  df_param <- comp_param(df)
+
+  mu_w <- df_param %>%
+    pull(mu_w) %>%
+    .[[1]]
+  mu_v <- df_param %>%
+    pull(mu_v) %>%
+    .[[1]]
+
+  MMI <- exp(p/q * mu_w - mu_v)
+  MMI
+}
+
+comp_f_beta <- function(beta_t, df = df_param) {
+  df_param <- comp_param(df)
+
+  sig_w <- df_param %>%
+    pull(sig_w) %>%
+    .[[1]]
+
+  f_beta <- exp(p/q * beta_t * sig_w)
+}
+
+comp_f_b <- function(beta_t, n, df = df_param, C = 0.95) {
+  df_param <- comp_param(df)
+
+  b <- qt(p = C, ncp = sqrt(n) * beta_t, df = n) / sqrt(n) - beta_t
+
+  sig_w <- df_param %>%
+    pull(sig_w) %>%
+    .[[1]]
+
+  f_beta <- exp(p/q * b * sig_w)
+}
+```
+
+The following function modifies the distribution parameters by reducing the
+variability of material properties only; this models an improvement in
+manufacturing process control.
+
+```{r reduce-helper}
+reduce_sig <- function(reduce) {
+  ## Reduce the variability (sigma) of the material properties by a given factor
+  df_param %>%
+    mutate(
+      sigma = case_when(
+        factor %in% c("Nx", "t_0", "t_1", "theta_0", "theta_1") ~ sigma,
+        TRUE ~ sigma * (1 - reduce)
+      )
+    )
+}
+```
+
+# Scenarios
+<!-- -------------------------------------------------- -->
+
+## Sample Sizes
+<!-- ------------------------- -->
+
+Let's consider a range of sample sizes.
+
+```{r sample-sweep}
+df_res <-
+  map_dfr(
+    10^seq(1, 3, length.out = 10),
+    function(n) {
+      mmi <- comp_mmi()
+      f_beta <- comp_f_beta(beta_t = 3)
+      f_b <- comp_f_b(beta_t = 3, n = n)
+
+      tibble(mmi = mmi, f_beta = f_beta, f_b = f_b, n = n)
+    }
+  )
+df_res
+```
+
+Visualize the scenarios.
+
+```{r vis-sweep}
+df_res %>%
+  mutate(
+    knockdown_Beta = 1 - f_beta,
+    ## knockdown_b = 1 - f_b,
+    knockdown_Total = 1 - f_beta * f_b
+  ) %>%
+  pivot_longer(
+    names_to = "factor",
+    names_prefix = "knockdown_",
+    values_to = "knockdown",
+    cols = matches("knockdown_")
+  ) %>%
+
+  ggplot(aes(n, knockdown, color = factor)) +
+  geom_line() +
+  scale_x_log10() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_color_discrete(name = "Factor") +
+  theme_common() +
+  labs(
+    x = "Samples",
+    y = "Knockdown"
+  )
+
+ggsave("../images/plate_sampling_scenarios.eps")
+```
+
+**Observations**:
+
+- At the minimum ($n = 10$) the total knockdown is $\approx50\%$
+- Sampling at $n = 100$ reduces the total knockdown to $\approx40\%$
+- Sampling much beyond $n = 100$ has diminishing returns, as the inherent knockdown (beta factor) dominates
+
+## Sampling vs Process Control
+<!-- ------------------------- -->
+
+```{r sample-process-sweep}
+scenario_reduced <- function(reduce) {
+  df_red <- reduce_sig(reduce)
+
+  map_dfr(
+    10^seq(1, 3, length.out = 10),
+    function(n) {
+      mmi <- comp_mmi(df = df_red)
+      f_beta <- comp_f_beta(df = df_red, beta_t = 3)
+      f_b <- comp_f_b(df = df_red, beta_t = 3, n = n)
+
+      tibble(mmi = mmi, f_beta = f_beta, f_b = f_b, n = n)
+    }
+  ) %>%
+  mutate(reduce = reduce)
+}
+
+df_sweep_reduce <-
+  map_dfr(
+    c(0, 0.10, 0.25, 0.5),
+    scenario_reduced
+  )
+```
+
+Visualize the scenarios
+
+```{r vis-reduce}
+df_sweep_reduce %>%
+  mutate(
+    knockdown_Beta = 1 - f_beta,
+    knockdown_Total = 1 - f_beta * f_b
+  ) %>%
+  pivot_longer(
+    names_to = "factor",
+    names_prefix = "knockdown_",
+    values_to = "knockdown",
+    cols = matches("knockdown_")
+  ) %>%
+  mutate(
+    factor = fct_relevel(factor, "Total", "Beta"),
+    r_percent = str_c(as.integer(reduce * 100), "%"),
+    r_percent = fct_reorder(r_percent, reduce)
+  ) %>%
+
+  ggplot(aes(n, knockdown)) +
+  geom_line(
+    aes(linetype = factor, color = as.factor(r_percent)),
+    size = 2
+  ) +
+  geom_point(
+    data = . %>%
+      filter(
+        as.integer(n) == 27,
+        reduce == 0.5,
+        factor == "Total"
+      ),
+    size = 4
+  ) +
+  scale_color_discrete(name = "Variability Reduction") +
+  scale_linetype(name = "Factor") +
+
+  scale_x_log10() +
+  scale_y_continuous(labels = scales::percent) +
+  theme_common() +
+  theme(legend.position = "bottom", legend.box = "vertical") +
+  labs(
+    title = "Laminate Angle-Ply Log-Precision Materials Indices",
+    x = "Number of Physical Tests",
+    y = "Knockdown"
+  )
+
+ggsave("../images/plate_reduce_scenarios.eps")
+```
+
+Extract the choosen scenario
+
+```{r point-scenario}
+df_sweep_reduce %>%
+  filter(
+    as.integer(n) == 27,
+    reduce == 0.5
+  ) %>%
+  mutate(Total = 1 - f_beta * f_b) %>%
+  select(Total, n, reduce)
+
+```
