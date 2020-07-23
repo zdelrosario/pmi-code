@@ -1,24 +1,36 @@
----
-title: "Example PMI Calculation"
-author: "Zachary del Rosario"
-date: 2020-07-09
-output:
-  github_document
----
+Example PMI Calculation
+================
+Zachary del Rosario
+2020-07-09
 
-This companion notebook accompanies the manuscript "Precision Materials Indices:
-Materials Selection with Statistically-rigorous Reliability Analysis." It
-provides a step-by-step example of computing a precision materials index (PMI)
-from raw data.
+This companion notebook accompanies the manuscript “Precision Materials
+Indices: Materials Selection with Statistically-rigorous Reliability
+Analysis.” It provides a step-by-step example of computing a precision
+materials index (PMI) from raw data.
 
 # Setup
+
 <!-- -------------------------------------------------- -->
 
-The following is just setup for the example.
+The following is just setup for the
+    example.
 
-```{r setup}
+``` r
 library(tidyverse)
+```
 
+    ## ── Attaching packages ─────────────────────────────────────── tidyverse 1.3.0 ──
+
+    ## ✔ ggplot2 3.3.1     ✔ purrr   0.3.4
+    ## ✔ tibble  3.0.1     ✔ dplyr   1.0.0
+    ## ✔ tidyr   1.1.0     ✔ stringr 1.4.0
+    ## ✔ readr   1.3.1     ✔ forcats 0.5.0
+
+    ## ── Conflicts ────────────────────────────────────────── tidyverse_conflicts() ──
+    ## ✖ dplyr::filter() masks stats::filter()
+    ## ✖ dplyr::lag()    masks stats::lag()
+
+``` r
 ## Ground-truth parameters for Al 6061-T6
 median_Y <- 40000.0
 median_rho <- 0.0975
@@ -44,16 +56,18 @@ sdlog_rho <- cov_rho
 ```
 
 # Example Calculation
+
 <!-- -------------------------------------------------- -->
 
 The following are the steps of calculating a PMI.
 
-## 1. Estimate parameters
+## 1\. Estimate parameters
+
 <!-- ------------------------- -->
 
 For demonstration purposes, simulate some data.
 
-```{r step1-1}
+``` r
 ## Sample size
 n <- 10
 
@@ -68,7 +82,7 @@ df_data <-
 
 Estimate parameters from simulated data.
 
-```{r step1-2}
+``` r
 ## KEY STEP: Log-transform data
 df_transformed <-
   df_data %>%
@@ -94,23 +108,26 @@ Sigma_hat <- matrix(
 )
 ```
 
-## 2. Convert to monomial-standard form
+## 2\. Convert to monomial-standard form
+
 <!-- ------------------------- -->
 
 In monomial-standard form the beam strength cost is
 
-$$\min_{t}\, Q = (l) t^{p=2} \rho^{v_{\rho} = 1},$$
+\[\min_{t}\, Q = (l) t^{p=2} \rho^{v_{\rho} = 1},\]
 
-while the reliability constraint is
+while the reliability constraint
+is
 
-$$\text{s.t. } \mathbb{P}_{Y}[ t^{q=-3} Y^{w_Y=-1} \leq (6fl)^{-1}] \geq \mathcal{R}.$$
+\[\text{s.t. } \mathbb{P}_{Y}[ t^{q=-3} Y^{w_Y=-1} \leq (6fl)^{-1}] \geq \mathcal{R}.\]
 
-## 3. Extract and compute
+## 3\. Extract and compute
+
 <!-- ------------------------- -->
 
 The extracted quantities are
 
-```{r step3-1}
+``` r
 p <- 2
 q <- -3
 v <- c("rho" = 1, "Y" = 0)
@@ -119,16 +136,17 @@ w <- c("rho" = 0, "Y" = -1)
 
 therefore the estimated statistics are
 
-```{r step3-2}
+``` r
 mu_v <- v %*% mu_hat
 mu_w <- w %*% mu_hat
 sig_w <- sqrt(t(w) %*% Sigma_hat %*% w)
 ```
 
-## 4. Set target and compute MIB
+## 4\. Set target and compute MIB
+
 <!-- ------------------------- -->
 
-```{r step4}
+``` r
 ## Set targets
 beta_t <- 3 # Reliability index
 C <- 0.95 # Confidence level
@@ -138,10 +156,11 @@ beta <- beta_t # Aspirational approximation
 b <- qt(p = C, ncp = sqrt(n) * beta, df = n) / sqrt(n) - beta
 ```
 
-## 5. Compute the PMI factors
+## 5\. Compute the PMI factors
+
 <!-- ------------------------- -->
 
-```{r step5}
+``` r
 MMI <- exp(p/q * mu_w - mu_v)
 f_beta_t <- exp(p/q * beta_t * sig_w)
 f_b <- exp(p/q * b * sig_w)
@@ -151,9 +170,19 @@ knockdown <- 1 - f_beta_t * f_b
 
 tibble(MMI = MMI, PMI = PMI, f_beta_t = f_beta_t, f_b = f_b) %>%
   knitr::kable(digits = 2)
+```
 
+|      MMI |      PMI | f\_beta\_t |     f\_b |
+| -------: | -------: | ---------: | -------: |
+| 12111.05 | 11435.99 |  0.9655435 | 0.977958 |
+
+``` r
 knockdown
 ```
 
-Variability (COV) of the material strength is modest: The combined knockdown of
-the material index due to aleatory and epistemic factors is about $6\%$.
+    ##            [,1]
+    ## [1,] 0.05573899
+
+Variability (COV) of the material strength is modest: The combined
+knockdown of the material index due to aleatory and epistemic factors is
+about \(6\%\).
